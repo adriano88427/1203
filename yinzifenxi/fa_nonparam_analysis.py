@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import scipy
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, Dict
 
 from .excel_parser import load_excel_sources, DEFAULT_PARSE_CONFIG
 from .fa_data_validator import DataValidator
@@ -42,6 +42,7 @@ from .fa_stat_utils import (
     safe_calculate_annual_return,
     validate_annual_return_calculation,
 )
+from .excel_parser import FactorNormalizer, NormalizationInfo
 from .fa_nonparam_helpers import (
     _fa_classify_factors_by_ic,
     _fa_generate_factor_classification_overview,
@@ -109,7 +110,15 @@ class FactorAnalysis:
         self.file_paths = resolved_paths
         self.file_path = self.file_paths[0] if self.file_paths else None
         self.data = data
-        self.factors = list(FACTOR_COLUMNS)
+        enabled_flags = DATA_PARSE_CONFIG.get("column_enabled", {}) or {}
+        self.factors = [
+            factor for factor in FACTOR_COLUMNS
+            if enabled_flags.get(factor, "是") != "否"
+        ]
+        self.disabled_factors = [
+            factor for factor in FACTOR_COLUMNS
+            if enabled_flags.get(factor, "是") == "否"
+        ]
         self.return_col = RETURN_COLUMN
         self.analysis_results = {}
         self.segment_overview = {}
@@ -130,6 +139,10 @@ class FactorAnalysis:
         self.parse_diagnostics = []
         self.unavailable_factors = set()
         self.loaded_sources = []
+        if getattr(self, "disabled_factors", None):
+            print("[INFO] 以下因子因配置被禁用: " + ", ".join(self.disabled_factors))
+        self.normalizer = FactorNormalizer()
+        self.normalization_stats: Dict[str, NormalizationInfo] = {}
         
         # 如果没有直接传入数据且有文件路径，则加载数据
         if self.data is None and self.file_path:
@@ -399,8 +412,28 @@ class FactorAnalysis:
             required_columns=[self.return_col, *self.factors],
         )
         result = validator.run()
+
+        def _emit(line: str):
+            if line is None:
+                return
+            text = line.rstrip()
+            if not text:
+                return
+            text = text.lstrip("\n")
+            stripped = text.lstrip()
+            needs_info_prefix = True
+            if stripped.startswith(("[INFO]", "[WARN]", "[ERROR]", "[STEP]", "[OK]", "[DEBUG]")):
+                needs_info_prefix = False
+            elif stripped.startswith("[VALIDATION]"):
+                needs_info_prefix = True
+            elif stripped.startswith("["):
+                needs_info_prefix = False
+            if needs_info_prefix:
+                text = f"[INFO] {text}"
+            print(text)
+
         for line in result.report_lines:
-            print(line)
+            _emit(line)
         return result.passed
 
     def _infer_year_from_name(self, path):
@@ -536,6 +569,27 @@ class FactorAnalysis:
                 ]
                 if missing_files:
                     print(f"  -> 列 '{col}' 在以下文件中缺失: {', '.join(missing_files)}")
+
+    def _get_column_diagnostics(self, column_name: str):
+        for diag in getattr(self, "parse_diagnostics", []):
+            columns = getattr(diag, "present_columns", []) or []
+            if column_name in columns:
+                return diag
+        return None
+
+    @staticmethod
+    def _fallback_numeric_conversion(series: pd.Series) -> pd.Series:
+        """旧版字符串→数值转换逻辑，供Normalizer失败时使用。"""
+        try:
+            col_series = series.astype(str).str.strip()
+            has_percent = col_series.str.contains('%').any()
+            cleaned = col_series.str.replace('%', '', regex=False)
+            numeric_series = pd.to_numeric(cleaned, errors='coerce')
+            if has_percent:
+                numeric_series = numeric_series / 100
+            return numeric_series
+        except Exception:
+            return pd.to_numeric(series, errors='coerce')
     
     def apply_factor_processing(self, df, factor_col, method='standardize', winsorize=True, winsorize_limits=(0.01, 0.99)):
         """
@@ -689,26 +743,26 @@ class FactorAnalysis:
                 self._report_missing_columns(missing_cols)
                 return False
             
-            # 自动处理所有待分析列（因子列 + 收益列）的字符串/百分比格式
+            self.normalization_stats = {}
             columns_to_normalize = list(dict.fromkeys(active_factors + [self.return_col]))
             for col in columns_to_normalize:
                 if col not in df.columns:
                     continue
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    continue
-                try:
-                    col_series = df[col].astype(str).str.strip()
-                    has_percent = col_series.str.contains('%').any()
-                    cleaned = col_series.str.replace('%', '', regex=False)
-                    numeric_series = pd.to_numeric(cleaned, errors='coerce')
-                    if has_percent:
-                        numeric_series = numeric_series / 100
-                        print(f"已自动将列 '{col}' 的百分比字符串转换为小数")
-                    else:
-                        print(f"已自动尝试将列 '{col}' 转换为数值类型")
-                    df[col] = numeric_series
-                except Exception as e:
-                    print(f"转换列 '{col}' 时出错: {e}")
+                raw_series = df[col]
+                diagnostics = self._get_column_diagnostics(col)
+                normalized_series, info = self.normalizer.normalize(col, raw_series, diagnostics)
+                if normalized_series.notna().any():
+                    df[col] = normalized_series
+                    self.normalization_stats[col] = info
+                    if info.applied_scale:
+                        print(f"[INFO] 列 '{col}' 自动缩放: {info.applied_scale}")
+                    elif info.semantic == "percent" and info.detected_percent_pattern:
+                        print(f"[INFO] 列 '{col}' 识别到百分比格式并已转换为小数")
+                else:
+                    fallback = self._fallback_numeric_conversion(raw_series)
+                    df[col] = fallback
+                    self.normalization_stats[col] = info
+                    print(f"[WARN] 列 '{col}' 正规化失败，使用回退转换")
             
             # 确保日期列正确处理
             if '信号日期' in df.columns:
@@ -730,14 +784,9 @@ class FactorAnalysis:
                     'params': {'winsorize': winsorize, 'winsorize_limits': winsorize_limits}
                 }
                 
-                # 尝试转换为数值型
+                # 保证因子列为数值型（Normalizer 失败时已回退）
                 if not pd.api.types.is_numeric_dtype(df[factor]):
-                    try:
-                        original_dtype = str(df[factor].dtype)
-                        df[factor] = pd.to_numeric(df[factor], errors='coerce')
-                        print(f"  因子 {factor} 从 {original_dtype} 转换为数值型")
-                    except:
-                        print(f"警告：无法将因子 {factor} 转换为数值型")
+                    df[factor] = pd.to_numeric(df[factor], errors='coerce')
                 
                 # 记录缺失值信息
                 missing_count = df[factor].isna().sum()
@@ -774,16 +823,9 @@ class FactorAnalysis:
                     print(f"  对因子 {factor} 进行 {factor_method} 处理")
                     df = self.apply_factor_processing(df, factor, factor_method, winsorize, winsorize_limits)
             
-            # 处理收益率列
+            # 确保收益率列为数值型
             if not pd.api.types.is_numeric_dtype(df[self.return_col]):
-                try:
-                    # 如果是百分比字符串，先去除百分号再转换
-                    if df[self.return_col].dtype == 'object':
-                        df[self.return_col] = df[self.return_col].str.replace('%', '')
-                    df[self.return_col] = pd.to_numeric(df[self.return_col], errors='coerce')
-                    print(f"收益率列 {self.return_col} 转换为数值型")
-                except:
-                    print(f"警告：无法将 {self.return_col} 转换为数值型")
+                df[self.return_col] = pd.to_numeric(df[self.return_col], errors='coerce')
             
             # 记录收益率列的缺失值和异常值
             missing_return_count = df[self.return_col].isna().sum()

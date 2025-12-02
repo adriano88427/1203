@@ -21,6 +21,7 @@ _INFO_KEYWORDS = (
     "[INFO]",
     "[STEP]",
     "[OK]",
+    "[DEBUG]",
 )
 
 

@@ -40,6 +40,7 @@ class DataValidator:
         min_file_coverage: float = 1.0,
         min_row_coverage: float = 0.8,
         min_year_coverage: float = 0.8,
+        enable_debug: Optional[bool] = None,
     ):
         self.file_paths = [os.path.abspath(p) for p in file_paths if p]
         self.diagnostics = list(diagnostics or [])
@@ -48,11 +49,22 @@ class DataValidator:
         self.min_file_coverage = min_file_coverage
         self.min_row_coverage = min_row_coverage
         self.min_year_coverage = min_year_coverage
+        env_debug = os.environ.get("FA_VALIDATOR_DEBUG")
+        if enable_debug is not None:
+            self.debug_enabled = bool(enable_debug)
+        elif env_debug is None:
+            self.debug_enabled = True
+        else:
+            self.debug_enabled = env_debug.strip().lower() not in ("0", "false", "no")
 
     def run(self) -> DataValidationResult:
         lines: List[str] = ["\n[VALIDATION] === 数据完整性验证 ==="]
         expected_files = len(self.file_paths)
         file_stats = self._aggregate_file_stats()
+        self._debug(
+            f"启动多表格对比验证：期望文件 {expected_files} 个，解析诊断 {len(self.diagnostics)} 条",
+            lines,
+        )
 
         total_loaded_rows = len(self.df)
         valid_files = [
@@ -75,6 +87,11 @@ class DataValidator:
             (total_loaded_rows / estimated_total_rows)
             if estimated_total_rows > 0
             else 0.0
+        )
+
+        self._debug(
+            f"聚合完成：成功文件 {valid_file_count} 个，总样本 {total_loaded_rows} 行，估算覆盖率 {row_coverage_ratio:.2%}",
+            lines,
         )
 
         lines.append(
@@ -115,6 +132,11 @@ class DataValidator:
             if path not in valid_files
         ]
         if missing_files:
+            self._debug(
+                "存在未读取的文件: " + ", ".join(missing_files),
+                lines,
+            )
+        if missing_files:
             lines.append(
                 f"  - 警告：以下文件未成功读取任何样本：{', '.join(missing_files)}"
             )
@@ -122,9 +144,20 @@ class DataValidator:
         year_info = self._summarize_year_coverage()
         lines.extend(year_info["lines"])
         observed_years = year_info["year_count"]
+        self._debug(
+            f"年份覆盖检查：检测到 {observed_years} 个年份记录",
+            lines,
+        )
 
         column_info = self._analyze_column_consistency()
         lines.extend(column_info["lines"])
+        if column_info.get("failed"):
+            self._debug(
+                "列对齐检查发现异常，请关注上方 FAIL 信息",
+                lines,
+            )
+        else:
+            self._debug("列对齐检查通过", lines)
 
         passed = True
         if expected_files and coverage_ratio < self.min_file_coverage:
@@ -144,10 +177,22 @@ class DataValidator:
 
         if passed:
             lines.append("[VALIDATION] 数据验证通过")
+            self._debug("多表格对比验证完成：状态 PASS", lines)
         else:
             lines.append("[VALIDATION] 数据验证未通过")
+            self._debug("多表格对比验证完成：状态 FAIL", lines)
 
         return DataValidationResult(passed=passed, report_lines=lines)
+
+    def _debug(self, message: str, buffer: Optional[List[str]] = None):
+        """记录调试信息到日志"""
+        if not getattr(self, "debug_enabled", False):
+            return
+        text = f"[DEBUG][DataValidator] {message}"
+        if buffer is not None:
+            buffer.append(text)
+        else:
+            print(text)
 
     def _aggregate_file_stats(self) -> "OrderedDict[str, dict]":
         stats: "OrderedDict[str, dict]" = OrderedDict()
@@ -186,13 +231,21 @@ class DataValidator:
 
     def _summarize_year_coverage(self) -> dict:
         lines: List[str] = []
-        date_column = None
-        for candidate in ("????", "????????"):
-        if date_column is None or self.df is None:
-            lines.append("  - ??????????????/?????")
+        if self.df is None or self.df.empty:
+            lines.append("  - 未提供合并数据，无法检查年份覆盖")
             return {"lines": lines, "year_count": 0, "years": []}
 
-        date_series = pd.to_datetime(self.df["信号日期"], errors="coerce")
+        date_column = None
+        for candidate in ("信号日期", "signal_date", "日期", "交易日期"):
+            if candidate in self.df.columns:
+                date_column = candidate
+                break
+
+        if date_column is None:
+            lines.append("  - 未找到信号日期/交易日期列，无法统计年份覆盖")
+            return {"lines": lines, "year_count": 0, "years": []}
+
+        date_series = pd.to_datetime(self.df[date_column], errors="coerce")
         valid_dates = date_series.dropna()
         unique_years = sorted(
             set(int(year) for year in valid_dates.dt.year.dropna().unique())
@@ -207,25 +260,23 @@ class DataValidator:
             lines.append("  - 未获取到有效年份信息")
         return {"lines": lines, "year_count": len(unique_years), "years": unique_years}
 
-
-
     def _analyze_column_consistency(self) -> dict:
-        lines: List[str] = ["  - ???????"]
+        lines: List[str] = ["  - 列值一致性检查"]
         failed = False
         if not COLUMN_ALIGNMENT_RULES:
-            lines.append("    ? ???????????")
+            lines.append("    · 未配置列对齐规则")
             return {"lines": lines, "failed": False}
         if self.df is None or self.df.empty:
-            lines.append("    [WARN] ??????????????")
+            lines.append("    [WARN] 数据为空，跳过列对齐检查")
             return {"lines": lines, "failed": False}
 
         date_column = None
-        for candidate in ("????", "???????"):
+        for candidate in ("信号日期", "signal_date", "日期", "交易日期"):
             if candidate in self.df.columns:
                 date_column = candidate
                 break
         if date_column is None:
-            lines.append("    [WARN] ???????????????")
+            lines.append("    [WARN] 未找到日期列，无法执行列对齐检查")
             return {"lines": lines, "failed": False}
 
         date_series = pd.to_datetime(self.df[date_column], errors="coerce")

@@ -84,6 +84,7 @@ def _fa_score_parameterized_factors(factor_results):
 
     for factor, results in factor_results.items():
         group_stats = results['group_stats']
+        factor_semantic = results.get('semantic')
         for _, group in group_stats.iterrows():
             param_range = group['参数区间']
             win_rate = group['胜率']
@@ -127,6 +128,7 @@ def _fa_score_parameterized_factors(factor_results):
                 '夏普得分': sharpe_score,
                 '风险得分': std_score,
                 '回撤得分': drawdown_score,
+                '值语义': factor_semantic,
             })
 
     df = pd.DataFrame(all_scores)

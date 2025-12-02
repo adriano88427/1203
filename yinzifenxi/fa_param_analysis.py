@@ -9,6 +9,7 @@ import unicodedata
 import numpy as np
 import pandas as pd
 from datetime import datetime
+from typing import Dict
 
 from .excel_parser import load_excel_sources, DEFAULT_PARSE_CONFIG
 from .fa_config import (
@@ -26,6 +27,7 @@ from .fa_stat_utils import (
     rolling_window_analysis,
     sample_sensitivity_analysis,
 )
+from .excel_parser import FactorNormalizer, NormalizationInfo
 
 
 class ParameterizedFactorAnalyzer:
@@ -43,8 +45,16 @@ class ParameterizedFactorAnalyzer:
             resolved_paths = []
         self.file_paths = resolved_paths
         self.file_path = self.file_paths[0] if self.file_paths else None
-        self.factors = list(FACTOR_COLUMNS)
+        enabled_flags = DATA_PARSE_CONFIG.get("column_enabled", {}) or {}
+        self.factors = [
+            factor for factor in FACTOR_COLUMNS
+            if enabled_flags.get(factor, "是") != "否"
+        ]
         self.factor_list = self.factors  # 修复：添加factor_list属性
+        self.disabled_factors = [
+            factor for factor in FACTOR_COLUMNS
+            if enabled_flags.get(factor, "是") == "否"
+        ]
         self.return_col = RETURN_COLUMN
         self.sqrt_annualization_factor = np.sqrt(252)
         self.annualization_factor = 252
@@ -53,6 +63,8 @@ class ParameterizedFactorAnalyzer:
             self.parse_config.update(DATA_PARSE_CONFIG)
         self.parse_diagnostics = []
         self.unavailable_columns = set()
+        self.normalizer = FactorNormalizer()
+        self.normalization_stats: Dict[str, NormalizationInfo] = {}
         
         # 确保数据有效
         if self.data is None or self.data.empty:
@@ -60,6 +72,8 @@ class ParameterizedFactorAnalyzer:
             # 不返回值，让对象仍可被创建但处于无效状态
         else:
             self.data = self._normalize_dataframe_columns(self.data)
+        if getattr(self, "disabled_factors", None):
+            print("[INFO] 以下因子因配置被禁用: " + ", ".join(self.disabled_factors))
 
     @staticmethod
     def _clean_column_name(name):
@@ -145,37 +159,33 @@ class ParameterizedFactorAnalyzer:
         try:
             # 复制数据
             df = self.data.copy()
-            
-            # 统一处理所有因子列及收益列的字符串/百分比格式
-            columns_to_normalize = list(dict.fromkeys(list(self.factors) + [self.return_col]))
-            for col in columns_to_normalize:
+
+            self.normalization_stats = {}
+            normalization_targets = list(dict.fromkeys(list(self.factors) + [self.return_col]))
+            for col in normalization_targets:
                 if col not in df.columns:
                     continue
-                if pd.api.types.is_numeric_dtype(df[col]):
-                    continue
-                try:
-                    col_series = df[col].astype(str).str.strip()
-                    has_percent = col_series.str.contains('%').any()
-                    cleaned = col_series.str.replace('%', '', regex=False)
-                    numeric_series = pd.to_numeric(cleaned, errors='coerce')
-                    if has_percent:
-                        numeric_series = numeric_series / 100
-                        print(f"已自动将列 '{col}' 的百分比字符串转换为小数")
-                    else:
-                        print(f"已自动尝试将列 '{col}' 转换为数值类型")
-                    df[col] = numeric_series
-                except Exception as e:
-                    print(f"转换列 '{col}' 时出错: {e}")
+                raw_series = df[col]
+                diagnostics = self._get_column_diagnostics(col)
+                normalized_series, info = self.normalizer.normalize(col, raw_series, diagnostics)
+                if normalized_series.notna().any():
+                    df[col] = normalized_series
+                    self.normalization_stats[col] = info
+                    if info.applied_scale:
+                        print(f"[INFO] 列 '{col}' 自动缩放: {info.applied_scale}")
+                    elif info.semantic == "percent" and info.detected_percent_pattern:
+                        print(f"[INFO] 列 '{col}' 识别到百分比格式并已转换为小数")
+                else:
+                    fallback = self._fallback_numeric_conversion(raw_series)
+                    df[col] = fallback
+                    self.normalization_stats[col] = info
+                    print(f"[WARN] 列 '{col}' 正规化失败，使用回退转换")
+
+            self._log_normalization_notes()
             
-            # 处理收益率列
+            # 处理收益率列（保证为数值）
             if not pd.api.types.is_numeric_dtype(df[self.return_col]):
-                try:
-                    if df[self.return_col].dtype == 'object':
-                        df[self.return_col] = df[self.return_col].str.replace('%', '')
-                    df[self.return_col] = pd.to_numeric(df[self.return_col], errors='coerce')
-                    print(f"收益率列 {self.return_col} 转换为数值型")
-                except:
-                    print(f"警告：无法将 {self.return_col} 转换为数值型")
+                df[self.return_col] = pd.to_numeric(df[self.return_col], errors='coerce')
             
             # 确保日期列正确处理
             if '信号日期' in df.columns:
@@ -196,6 +206,27 @@ class ParameterizedFactorAnalyzer:
         except Exception as e:
             print(f"数据预处理失败: {e}")
             return False
+    
+    def _log_normalization_notes(self):
+        """在日志中输出数据标准化说明表格。"""
+        stats = getattr(self, "normalization_stats", {}) or {}
+        if not stats:
+            return
+        rows = []
+        for column, info in stats.items():
+            applied = "--" if info.applied_scale is None else f"{info.applied_scale:g}"
+            notes = info.notes or ("自动识别百分比" if info.detected_percent_pattern else "--")
+            rows.append({
+                "列名": column,
+                "语义": info.semantic,
+                "展示格式": info.display,
+                "缩放": applied,
+                "备注": notes,
+            })
+        if rows:
+            table = pd.DataFrame(rows, columns=["列名", "语义", "展示格式", "缩放", "备注"])
+            print("\n[INFO] === 数据标准化说明 ===")
+            print(table.to_string(index=False))
 
     def _report_parse_integrity(self):
         """根据解析诊断信息输出每个文件的字段覆盖情况。"""
@@ -263,11 +294,33 @@ class ParameterizedFactorAnalyzer:
         else:
             print("[DATA] 所有因子在各年份均存在有效样本")
         df.drop(columns='__year__', inplace=True, errors='ignore')
+
+    def _get_column_diagnostics(self, column_name: str):
+        for diag in getattr(self, "parse_diagnostics", []):
+            columns = getattr(diag, "present_columns", []) or []
+            if column_name in columns:
+                return diag
+        return None
+
+    @staticmethod
+    def _fallback_numeric_conversion(series: pd.Series) -> pd.Series:
+        try:
+            col_series = series.astype(str).str.strip()
+            has_percent = col_series.str.contains('%').any()
+            cleaned = col_series.str.replace('%', '', regex=False)
+            numeric_series = pd.to_numeric(cleaned, errors='coerce')
+            if has_percent:
+                numeric_series = numeric_series / 100
+            return numeric_series
+        except Exception:
+            return pd.to_numeric(series, errors='coerce')
     
     def calculate_comprehensive_metrics(self, factor_col):
         """计算综合指标"""
         df_clean = self.processed_data.dropna(subset=[factor_col, self.return_col]).copy()
         has_signal_date = '信号日期' in df_clean.columns
+        norm_info = self.normalization_stats.get(factor_col)
+        semantic = norm_info.semantic if norm_info else None
         if has_signal_date:
             df_clean = df_clean.sort_values('信号日期')
         else:
@@ -296,11 +349,12 @@ class ParameterizedFactorAnalyzer:
                 factor_values = group_data[factor_col]
                 min_val = factor_values.min()
                 max_val = factor_values.max()
-                abs_bound = max(abs(min_val), abs(max_val))
-                if abs_bound <= 2:
-                    param_range = f"[{min_val * 100:.2f}%, {max_val * 100:.2f}%]"
-                else:
-                    param_range = f"[{min_val:.3f}, {max_val:.3f}]"
+                param_range = self.normalizer.format_range(
+                    factor_col,
+                    float(min_val),
+                    float(max_val),
+                    semantic=semantic,
+                )
                 
                 # 计算该组的收益统计
                 returns = group_data[self.return_col]
@@ -461,7 +515,8 @@ class ParameterizedFactorAnalyzer:
                 'group_stats': group_stats_df,
                 'long_short_return': long_short_return,
                 'total_samples': total_samples,
-                'factor_col': factor_col
+                'factor_col': factor_col,
+                'semantic': semantic,
             }
             
         except Exception as e:
