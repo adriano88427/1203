@@ -28,7 +28,14 @@ import pandas as pd
 import numpy as np
 import scipy
 import matplotlib.pyplot as plt
-from yinzifenxi.fa_config import DEFAULT_DATA_FILE, DEFAULT_DATA_FILES
+from yinzifenxi.fa_config import (
+    DEFAULT_DATA_FILE,
+    DEFAULT_DATA_FILES,
+    ANALYSIS_SWITCHES,
+    DUAL_FACTOR_SETTINGS,
+    DUAL_REPORT_OPTIONS,
+    validate_dual_config,
+)
 from yinzifenxi.fa_logging import Logger as ExternalLogger
 from yinzifenxi.fa_nonparam_analysis import (
     FactorAnalysis,
@@ -51,6 +58,15 @@ from yinzifenxi.fa_nonparam_report import (
     _fa_generate_positive_factors_analysis,
     _fa_generate_negative_factors_analysis,
 )
+try:
+    from yinzifenxi.fa_dual_nonparam_analysis import run_dual_nonparam_pipeline
+except ImportError:  # pragma: no cover
+    run_dual_nonparam_pipeline = None
+
+try:
+    from yinzifenxi.fa_dual_param_analysis import run_dual_param_pipeline
+except ImportError:  # pragma: no cover
+    run_dual_param_pipeline = None
 
 # 读取完整因子数据文件
 configured_files = list(DEFAULT_DATA_FILES) if DEFAULT_DATA_FILES else []
@@ -243,6 +259,7 @@ def main(argv=None):
     print("\n[INFO] === 因子分析结果已保存 ===")
     
     print("\n[INFO] 开始生成带参数因子综合分析报告...")
+    parameterized_analyzer = None
     try:
         parameterized_analyzer = ParameterizedFactorAnalyzer(analyzer.data.copy())
         if parameterized_analyzer.preprocess_data():
@@ -264,11 +281,72 @@ def main(argv=None):
             print("[ERROR] 带参数因子数据预处理失败")
     except Exception as e:
         print(f"[ERROR] 生成带参数因子综合分析报告时出错: {str(e)}")
+
+    dual_config = validate_dual_config()
+    _run_dual_nonparam_workflow(analyzer, dual_config, logger)
+    if parameterized_analyzer is not None:
+        _run_dual_param_workflow(parameterized_analyzer, dual_config, logger)
+    else:
+        print("[WARN] 带参数数据不可用，跳过双因子带参数分析")
     
     print("\n[INFO] 因子分析程序已完成")
     logger.close()
 
 
+def _run_dual_nonparam_workflow(analyzer, dual_config, logger):
+    """执行非参数双因子分析（可选）。"""
+    if not ANALYSIS_SWITCHES.get("dual_nonparam"):
+        return
+    if not run_dual_nonparam_pipeline:
+        print("[WARN] 双因子非参数分析模块未安装，已跳过")
+        return
+    print("\n[INFO] === 双因子非参数分析 ===")
+    try:
+        outputs = run_dual_nonparam_pipeline(
+            analyzer,
+            dual_config,
+            DUAL_REPORT_OPTIONS,
+            logger=logger,
+        )
+        if outputs:
+            csv_path = outputs.get("csv_path")
+            html_path = outputs.get("html_path")
+            if csv_path:
+                print(f"[OK] 双因子非参数 CSV 已生成: {csv_path}")
+            if html_path:
+                print(f"[OK] 双因子非参数 HTML 已生成: {html_path}")
+    except Exception as exc:
+        print(f"[ERROR] 双因子非参数分析失败: {exc}")
+
+
+def _run_dual_param_workflow(parameterized_analyzer, dual_config, logger):
+    """执行带参数双因子分析（可选）。"""
+    if not ANALYSIS_SWITCHES.get("dual_param"):
+        return
+    if not run_dual_param_pipeline:
+        print("[WARN] 双因子带参数分析模块未安装，已跳过")
+        return
+    print("\n[INFO] === 双因子带参数分析 ===")
+    try:
+        outputs = run_dual_param_pipeline(
+            parameterized_analyzer,
+            dual_config,
+            DUAL_REPORT_OPTIONS,
+            logger=logger,
+        )
+        if outputs:
+            csv_path = outputs.get("csv_path")
+            html_path = outputs.get("html_path")
+            excel_path = outputs.get("excel_path")
+            if csv_path:
+                print(f"[OK] 双因子带参数 CSV 已生成: {csv_path}")
+            if excel_path:
+                print(f"[OK] 双因子带参数 Excel 已生成: {excel_path}")
+            if html_path:
+                print(f"[OK] 双因子带参数 HTML 已生成: {html_path}")
+    except Exception as exc:
+        print(f"[ERROR] 双因子带参数分析失败: {exc}")
+
+
 if __name__ == "__main__":
     main()
-

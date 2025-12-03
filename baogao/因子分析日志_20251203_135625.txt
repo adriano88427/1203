@@ -1,8 +1,8 @@
-因子分析日志 - 2025-12-02 19:29:39
+因子分析日志 - 2025-12-03 13:56:25
 ============================================================
 
 [INFO] 因子分析程序启动
-[INFO] 日志输出文件: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\因子分析日志_20251202_192939.txt
+[INFO] 日志输出文件: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\因子分析日志_20251203_135625.txt
 [INFO] 数据加载成功: 21041 行, 列数 55 (解析 5 个工作表)
 [INFO] 开始加载数据...
 [INFO] 数据加载完成，原始样本量 21041 行
@@ -380,10 +380,10 @@
 [INFO] === 因子分析结果已保存 ===
 [INFO] 开始生成带参数因子综合分析报告...
 [INFO] === ??????? ===
-[INFO] 已生成带高亮的Excel: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\带参数因子分析数据_20251202_193657.xlsx
-[OK] 带参数因子综合分析 HTML 报告已生成: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\带参数因子综合分析报告_20251202_193657.html
+[INFO] 已生成带高亮的Excel: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\带参数因子分析数据_20251203_140402.xlsx
+[OK] 带参数因子综合分析 HTML 报告已生成: c:\Users\NINGMEI\Documents\trae_projects\WEIBO\baogao\带参数因子综合分析报告_20251203_140402.html
 [INFO] 因子分析程序已完成
 
 
-日志记录结束 - 2025-12-02 19:36:58
+日志记录结束 - 2025-12-03 14:04:02
 ============================================================

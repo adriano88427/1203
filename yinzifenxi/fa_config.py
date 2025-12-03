@@ -2,8 +2,21 @@
 
 """配置与常量模块，集中管理路径/文件相关设置。"""
 
+import copy
 import os
 from typing import Dict, Any, List
+
+# ============================================================
+# 分析开关：用于控制哪些分析模块会被执行。
+# - single_nonparam / single_param 默认为 True，保持原有行为。
+# - dual_nonparam / dual_param 默认由环境变量控制，便于按需启用双因子分析。
+# ============================================================
+ANALYSIS_SWITCHES: Dict[str, bool] = {
+    "single_nonparam": True,  # 单因子-非参数分析
+    "single_param": True,     # 单因子-带参数分析
+    "dual_nonparam": True,    # 双因子-非参数分析（在此处切换，无需环境变量）
+    "dual_param": True,       # 双因子-带参数分析（在此处切换，无需环境变量）
+}
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 数据目录 / 报表目录（相对于项目根目录）
@@ -188,6 +201,69 @@ COLUMN_ALIGNMENT_RULES: Dict[str, Dict[str, Any]] = {}
 # 需要分析的因子列（非参数 & 带参数分析都会引用）
 # 程序会自动对这些列（及收益列）尝试进行字符串/百分比到数值的转换，无需额外配置。
 FACTOR_COLUMNS = _derive_factor_columns()
+"""  """
+# =============================
+# 双因子分析配置
+# =============================
+
+DUAL_FACTOR_SETTINGS: Dict[str, Any] = {
+    "nonparam_bins": int(os.getenv("FA_DUAL_NONPARAM_BINS", "5")),
+    "nonparam_top_n": int(os.getenv("FA_DUAL_NONPARAM_TOP_N", "6")),
+    "max_factor_pairs": int(os.getenv("FA_DUAL_MAX_PAIRS", "30")),
+    "min_samples": int(os.getenv("FA_DUAL_MIN_SAMPLES", "800")),
+    "nonparam_factor_pairs": [],
+    "param_factor_pairs": [],
+    "param_ranges": {},
+    "param_min_samples": int(os.getenv("FA_DUAL_PARAM_MIN_SAMPLES", "300")),
+    "param_default_bins": int(os.getenv("FA_DUAL_PARAM_BINS", "3")),
+    "enable_prescreen": os.getenv("FA_DUAL_PRESCREEN", "true").strip().lower() != "false",
+}
+
+DUAL_REPORT_OPTIONS: Dict[str, Any] = {
+    "nonparam_prefix": "双因子非参数",
+    "param_prefix": "双因子带参数",
+    "output_dir": os.getenv("FA_DUAL_OUTPUT_DIR", REPORT_OUTPUT_DIR),
+    "heatmap_enabled": True,
+    "max_rank_display": 10,
+}
+
+_DUAL_CONFIG_LIMITS = {
+    "nonparam_bins": (3, 10),
+    "nonparam_top_n": (2, 20),
+    "max_factor_pairs": (1, 100),
+    "min_samples": (200, 5000),
+    "param_min_samples": (50, 2000),
+    "param_default_bins": (2, 10),
+}
+os.makedirs(DUAL_REPORT_OPTIONS["output_dir"], exist_ok=True)
+
+
+def validate_dual_config(settings: Dict[str, Any] = None) -> Dict[str, Any]:
+    """
+    校验双因子配置，确保核心参数在合理范围。
+    返回安全的配置副本，不会修改原始常量。
+    """
+    cfg = copy.deepcopy(DUAL_FACTOR_SETTINGS)
+    if settings:
+        for key, value in settings.items():
+            if value is not None:
+                cfg[key] = value
+
+    for key, (low, high) in _DUAL_CONFIG_LIMITS.items():
+        if key not in cfg:
+            continue
+        try:
+            numeric = int(cfg[key])
+        except (TypeError, ValueError):
+            numeric = low
+        if numeric < low:
+            print(f"[WARN] 双因子配置 {key}={numeric} 低于推荐下限，已调整为 {low}")
+            numeric = low
+        if numeric > high:
+            print(f"[WARN] 双因子配置 {key}={numeric} 高于推荐上限，已调整为 {high}")
+            numeric = high
+        cfg[key] = numeric
+    return cfg
 
 # =============================
 # 系统内置常量（无需用户调整）
